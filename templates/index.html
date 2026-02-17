@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SentiAlign</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <br>
+            <br>
+            <br>
+            <br>
+            <br>
+            <h1 class="title">SentiAlign</h1>
+            <p class="subtitle">Analyze text sentiment using multiple AI models with explainable results</p>
+        </header>
+
+        <main>
+            <div class="card">
+                <label for="text-input" class="input-label">Insert Text to Analyze:</label>
+                <textarea 
+                    id="text-input" 
+                    class="text-input" 
+                    placeholder="Type or Paste your text here ..."
+                    rows="8"
+                ></textarea>
+                <button id="analyze-btn" class="analyze-btn">
+                    <span>Analyze</span>
+                    <span class="arrow">→</span>
+                </button>
+            </div>
+
+            <div id="loading" class="loading hidden">
+                <p>Analyzing sentiment...</p>
+            </div>
+
+            <div id="error" class="error hidden"></div>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+[
+  {
+    "input_text": "Dev environment course creation is not working",
+    "resolved_sentiment": "Negative",
+    "confidence": 0.9986098404800748,
+    "feedback_label": "correct",
+    "feedback_text": ""
+  },
+  {
+    "input_text": "dev environment not working",
+    "resolved_sentiment": "Negative",
+    "confidence": 0.9992956323350606,
+    "feedback_label": "correct",
+    "feedback_text": "It seems correct"
+  },
+  {
+    "input_text": "dev environment is not working",
+    "resolved_sentiment": "Negative",
+    "confidence": 0.9993623685782049,
+    "feedback_label": "correct",
+    "feedback_text": ""
+  }
+]

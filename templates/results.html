@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Analysis Results - SentiAlign</title>
+    <link
+      rel="stylesheet"
+      href="{{ url_for('static', filename='style.css') }}"
+    />
+  </head>
+
+  <body>
+    <div class="container">
+      <header>
+        <h1 class="title">SentiAlign</h1>
+        <p class="subtitle">Sentiment Analysis Results</p>
+      </header>
+
+      <main>
+        <div class="result-section">
+          <h2 class="tooltip">
+            Analyzed Text
+            <span class="tooltip-text">
+              The original input text provided by the user for sentiment
+              analysis.
+            </span>
+          </h2>
+
+          <div class="analyzed-text">
+            <p>{{ input_text }}</p>
+          </div>
+        </div>
+
+        <div class="result-section">
+          <h2 class="tooltip">
+            Resolved Sentiment
+            <span class="tooltip-text">
+              Final sentiment predicted by the conflict-aware meta-classifier
+              after combining BERT, RoBERTa, and Senti4SD outputs.
+            </span>
+          </h2>
+
+          <div class="resolved-sentiment">
+            <span class="sentiment-label {{ results.resolved.label.lower() }}">
+              {{ results.resolved.label }}
+            </span>
+            <span class="confidence tooltip">
+              Confidence: {{ "%.1f"|format(results.resolved.confidence * 100)
+              }}%
+              <span class="tooltip-text">
+                Probability assigned to the final sentiment by the resolver
+                model. Higher values indicate stronger agreement among base
+                models.
+              </span>
+            </span>
+          </div>
+          <div class="probabilities">
+            <div class="prob-item">
+              <span class="prob-label">Negative:</span>
+              <span class="prob-value"
+                >{{ "%.2f"|format(results.resolved.probabilities.negative * 100)
+                }}%</span
+              >
+            </div>
+            <div class="prob-item">
+              <span class="prob-label">Neutral:</span>
+              <span class="prob-value"
+                >{{ "%.2f"|format(results.resolved.probabilities.neutral * 100)
+                }}%</span
+              >
+            </div>
+            <div class="prob-item">
+              <span class="prob-label">Positive:</span>
+              <span class="prob-value"
+                >{{ "%.2f"|format(results.resolved.probabilities.positive * 100)
+                }}%</span
+              >
+            </div>
+          </div>
+        </div>
+
+        <div class="result-section">
+          <h2>Base Model Predictions</h2>
+          <div class="base-models">
+            <div class="model-result">
+              <h3 class="tooltip">
+                BERT
+                <span class="tooltip-text">
+                  Multilingual BERT model predicting sentiment using a 5-star
+                  scale (1 = strong negative, 5 = strong positive).
+                </span>
+              </h3>
+
+              <p class="model-label">
+                {{ results.base_predictions.bert.label }}
+              </p>
+              <div class="model-probs">
+                <medium>
+                  Class 1: {{
+                  "%.2f"|format(results.base_predictions.bert.probabilities.class_1
+                  * 100) }}%<br />
+                  Class 2: {{
+                  "%.2f"|format(results.base_predictions.bert.probabilities.class_2
+                  * 100) }}%<br />
+                  Class 3: {{
+                  "%.2f"|format(results.base_predictions.bert.probabilities.class_3
+                  * 100) }}%<br />
+                  Class 4: {{
+                  "%.2f"|format(results.base_predictions.bert.probabilities.class_4
+                  * 100) }}%<br />
+                  Class 5: {{
+                  "%.2f"|format(results.base_predictions.bert.probabilities.class_5
+                  * 100) }}%
+                </medium>
+              </div>
+            </div>
+            <div class="model-result">
+              <h3 class="tooltip">
+                RoBERTa
+                <span class="tooltip-text">
+                  RoBERTa model predicting sentiment as Negative, Neutral, or
+                  Positive.
+                </span>
+              </h3>
+
+              <p class="model-label">
+                {{ results.base_predictions.roberta.label }}
+              </p>
+              <div class="model-probs">
+                <medium>
+                  Negative: {{
+                  "%.2f"|format(results.base_predictions.roberta.probabilities.negative
+                  * 100) }}%<br />
+                  Neutral: {{
+                  "%.2f"|format(results.base_predictions.roberta.probabilities.neutral
+                  * 100) }}%<br />
+                  Positive: {{
+                  "%.2f"|format(results.base_predictions.roberta.probabilities.positive
+                  * 100) }}%
+                </medium>
+              </div>
+            </div>
+            <div class="model-result">
+              <h3 class="tooltip">
+                Senti4SD
+                <span class="tooltip-text">
+                  Lexicon-based sentiment analyzer using positive and negative
+                  opinion words to infer sentiment polarity.
+                </span>
+              </h3>
+
+              <p class="model-label">
+                {{ results.base_predictions.senti4sd.label }}
+              </p>
+              <div class="model-probs">
+                <medium>
+                  Negative: {{
+                  "%.2f"|format(results.base_predictions.senti4sd.probabilities.negative
+                  * 100) }}%<br />
+                  Neutral: {{
+                  "%.2f"|format(results.base_predictions.senti4sd.probabilities.neutral
+                  * 100) }}%<br />
+                  Positive: {{
+                  "%.2f"|format(results.base_predictions.senti4sd.probabilities.positive
+                  * 100) }}%
+                </medium>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="result-section">
+          <h2 class="tooltip">
+            Explanation
+            <span class="tooltip-text">
+              Natural language explanation generated using SHAP values,
+              highlighting which model signals influenced the final decision.
+            </span>
+          </h2>
+
+          <div class="explanation" id="explanation-text">
+            {{ results.explanation }}
+          </div>
+        </div>
+
+        {% if results.shap_contributions %}
+        <div class="result-section">
+          <h2 class="tooltip">
+            Feature Contributions (SHAP)
+            <span class="tooltip-text">
+              SHAP values show how each model probability contributed to the
+              final sentiment decision.
+            </span>
+          </h2>
+
+          <div class="shap-contributions">
+            <table class="shap-table">
+              <thead>
+                <tr>
+                  <th>Feature</th>
+                  <th>Contribution</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for contrib in results.shap_contributions %}
+                <tr>
+                  <td><code>{{ contrib.feature }}</code></td>
+                  <td
+                    class="shap-value {{ 'positive' if contrib.shap_value > 0 else 'negative' }}"
+                  >
+                    {{ "%.4f"|format(contrib.shap_value) }}
+                  </td>
+                  <td>{{ contrib.meaning }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% endif %}
+
+        <div class="result-section">
+          <h2>Your Feedback</h2>
+          <p class="feedback-instruction">
+            Was the resolved sentiment correct for the given text?
+          </p>
+
+          <form id="feedback-form">
+            <div class="feedback-options">
+              <br />
+              <label>
+                <input
+                  type="radio"
+                  name="feedback_label"
+                  value="correct"
+                  required
+                />
+                Yes, the result is correct
+              </label>
+
+              <label>
+                <input type="radio" name="feedback_label" value="incorrect" />
+                No, the result is incorrect
+              </label>
+              <br />
+            </div>
+
+            <div class="feedback-comment">
+              <label for="feedback_text">Optional comment:</label>
+              <textarea
+                id="feedback_text"
+                name="feedback_text"
+                placeholder="Explain why you think the result is correct or incorrect..."
+              ></textarea>
+            </div>
+
+            <button type="submit" class="btn-primary">Submit Feedback</button>
+            <p id="feedback-status" class="feedback-status"></p>
+          </form>
+        </div>
+
+        <div class="action-buttons">
+          <a href="{{ url_for('index') }}" class="btn-primary"
+            >Analyze Another Text</a
+          >
+        </div>
+      </main>
+    </div>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+  </body>
+</html>

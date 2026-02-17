@@ -1,4 +1,14 @@
-# app.py (memory-optimized for Render free tier: lazy-load transformers, optional SHAP, no pandas)
+# app.py (Render-safe + memory-optimized)
+# Key fixes:
+# - Lazy-load heavy models (torch/transformers/shap) only when needed
+# - Avoid pandas entirely (features are numpy array)
+# - SHAP disabled by default; optional via include_shap=true
+# - Add /api/warmup route to pre-download HF models and expose errors in logs
+# - Better error logging (tracebacks) so Render shows real cause
+# - Safer secret key via env var
+#
+# Recommended Render start command:
+#   gunicorn app:app --workers 1 --threads 1 --timeout 180
 
 from flask import (
     Flask, render_template, request, jsonify, redirect, url_for,
@@ -19,18 +29,16 @@ FRONTEND_DIST_DIR = os.path.join(os.path.dirname(__file__), "frontend", "dist")
 # ----------------------------
 # NLTK resources (best-effort)
 # ----------------------------
-# Download NLTK resources if not already present
-# On Render, downloading at boot can be slow; we keep it but make it quiet and safe.
+# On Render, downloading at boot can fail if network is restricted or slow.
+# We keep it best-effort; lexicon will fallback to empty sets.
 try:
     nltk.data.find("corpora/opinion_lexicon")
 except LookupError:
     try:
         nltk.download("opinion_lexicon", quiet=True)
     except Exception:
-        # If download fails, app can still run; lexicon will be empty.
         pass
 
-# Load Senti4SD-like lexicon (opinion_lexicon)
 try:
     positive_words = set(opinion_lexicon.positive())
     negative_words = set(opinion_lexicon.negative())
@@ -38,15 +46,19 @@ except Exception:
     positive_words, negative_words = set(), set()
 
 # ----------------------------
-# Resolver (lightweight)
+# Resolver model (joblib/pickle)
 # ----------------------------
 RESOLVER_MODEL_PATH = "sentiment_conflict_resolver.pkl"
 try:
     resolver = joblib.load(RESOLVER_MODEL_PATH)
+    print(f"[OK] Loaded resolver model from {RESOLVER_MODEL_PATH}")
 except FileNotFoundError:
     resolver = None
+    print(f"[ERROR] Could not find {RESOLVER_MODEL_PATH}. Upload/commit it to the repo root.")
+except Exception as e:
+    resolver = None
+    print(f"[ERROR] Failed to load resolver pickle: {e}")
 
-# Feature order expected by resolver (keep identical to training)
 FEATURES = [
     "bert_prob_1", "bert_prob_2", "bert_prob_3", "bert_prob_4", "bert_prob_5",
     "roberta_prob_neg", "roberta_prob_neu", "roberta_prob_pos",
@@ -78,40 +90,55 @@ bert_model = None
 roberta_tokenizer = None
 roberta_model = None
 
-# SHAP: do NOT import globally; only import+init when requested.
+# SHAP explainer is also lazy
 shap_explainer = None
 
 
 def _torch():
-    """Local import torch to avoid memory at import time."""
+    """Local torch import to keep startup memory lower."""
     import torch
     return torch
 
 
+def _hf_is_offline() -> bool:
+    """Allow turning HF downloads off via env."""
+    return os.getenv("HF_HUB_OFFLINE", "0").strip() in ("1", "true", "True", "yes", "YES")
+
+
 def get_bert():
-    """Lazy-load BERT tokenizer/model only when needed."""
     global bert_tokenizer, bert_model
     if bert_model is None or bert_tokenizer is None:
         from transformers import AutoTokenizer, AutoModelForSequenceClassification
         torch = _torch()
-        bert_tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL_NAME)
-        bert_model = AutoModelForSequenceClassification.from_pretrained(BERT_MODEL_NAME)
+        if _hf_is_offline():
+            # If offline, you must pre-bundle model files or mount cache.
+            bert_tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL_NAME, local_files_only=True)
+            bert_model = AutoModelForSequenceClassification.from_pretrained(BERT_MODEL_NAME, local_files_only=True)
+        else:
+            bert_tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL_NAME)
+            bert_model = AutoModelForSequenceClassification.from_pretrained(BERT_MODEL_NAME)
+
         bert_model.eval()
-        # Ensure CPU inference
         bert_model.to(torch.device("cpu"))
+        print("[OK] BERT loaded")
     return bert_tokenizer, bert_model
 
 
 def get_roberta():
-    """Lazy-load RoBERTa tokenizer/model only when needed."""
     global roberta_tokenizer, roberta_model
     if roberta_model is None or roberta_tokenizer is None:
         from transformers import RobertaTokenizer, RobertaForSequenceClassification
         torch = _torch()
-        roberta_tokenizer = RobertaTokenizer.from_pretrained(ROBERTA_MODEL_NAME)
-        roberta_model = RobertaForSequenceClassification.from_pretrained(ROBERTA_MODEL_NAME)
+        if _hf_is_offline():
+            roberta_tokenizer = RobertaTokenizer.from_pretrained(ROBERTA_MODEL_NAME, local_files_only=True)
+            roberta_model = RobertaForSequenceClassification.from_pretrained(ROBERTA_MODEL_NAME, local_files_only=True)
+        else:
+            roberta_tokenizer = RobertaTokenizer.from_pretrained(ROBERTA_MODEL_NAME)
+            roberta_model = RobertaForSequenceClassification.from_pretrained(ROBERTA_MODEL_NAME)
+
         roberta_model.eval()
         roberta_model.to(torch.device("cpu"))
+        print("[OK] RoBERTa loaded")
     return roberta_tokenizer, roberta_model
 
 
@@ -132,8 +159,7 @@ def validate_input_text(text: str):
     if len(stripped) > 4000:
         return False, "Text is too long. Please shorten it to under 4000 characters."
 
-    has_alpha = any(ch.isalpha() for ch in stripped)
-    if not has_alpha:
+    if not any(ch.isalpha() for ch in stripped):
         return False, "The input does not contain letters. Please enter natural language text instead of only numbers or symbols."
 
     non_space_chars = [ch for ch in stripped if not ch.isspace()]
@@ -152,21 +178,14 @@ def validate_input_text(text: str):
 # Base model predictions
 # ----------------------------
 def get_bert_probs(text: str):
-    """BERT probs (5-class)."""
+    """BERT probabilities (5-class)."""
     if not isinstance(text, str) or text.strip() == "":
         return [0.0, 0.0, 0.0, 0.0, 0.0]
 
     tokenizer, model = get_bert()
     torch = _torch()
 
-    inputs = tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-        padding=True,
-        max_length=256
-    )
-
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=256)
     with torch.no_grad():
         outputs = model(**inputs)
 
@@ -175,21 +194,14 @@ def get_bert_probs(text: str):
 
 
 def get_roberta_probs(text: str):
-    """RoBERTa probs (neg, neu, pos)."""
+    """RoBERTa probabilities (neg, neu, pos)."""
     if not isinstance(text, str) or text.strip() == "":
-        return [1/3, 1/3, 1/3]
+        return [1 / 3, 1 / 3, 1 / 3]
 
     tokenizer, model = get_roberta()
     torch = _torch()
 
-    inputs = tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-        padding=True,
-        max_length=256
-    )
-
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=256)
     with torch.no_grad():
         outputs = model(**inputs)
 
@@ -200,7 +212,7 @@ def get_roberta_probs(text: str):
 def get_senti4sd_probs(text: str):
     """Lexicon-based 3-class probs (neg, neu, pos)."""
     if not isinstance(text, str) or text.strip() == "":
-        return [1/3, 1/3, 1/3]
+        return [1 / 3, 1 / 3, 1 / 3]
 
     tokens = text.lower().split()
     pos_count = sum(1 for t in tokens if t in positive_words)
@@ -209,13 +221,13 @@ def get_senti4sd_probs(text: str):
 
     if score > 0:
         return [0.1, 0.1, 0.8]
-    elif score < 0:
+    if score < 0:
         return [0.8, 0.1, 0.1]
     return [0.2, 0.6, 0.2]
 
 
 def bert_label_from_probs(probs):
-    """Map BERT 1-5 stars to -1,0,+1."""
+    """Map 1-5 star BERT to -1, 0, +1."""
     label = int(np.argmax(probs)) + 1
     if label <= 2:
         return -1
@@ -241,7 +253,7 @@ def get_base_predictions(text: str):
 
 
 def prepare_features(base_preds):
-    """Return 2D numpy array in resolver expected order (no pandas)."""
+    """Return a 2D numpy array in the resolver-expected order (no pandas)."""
     bert_probs = base_preds["bert"]["probs"]
     roberta_probs = base_preds["roberta"]["probs"]
     senti4sd_probs = base_preds["senti4sd"]["probs"]
@@ -255,10 +267,22 @@ def prepare_features(base_preds):
 
 
 # ----------------------------
-# Explanation helpers
+# Explanations
 # ----------------------------
+def _fallback_explanation(resolved_label, prob_dict, base_preds):
+    label_map_local = {-1: "Negative", 0: "Neutral", 1: "Positive"}
+    confidence = float(max(prob_dict.values()))
+    confidence_level = "high" if confidence > 0.7 else "moderate" if confidence > 0.5 else "low"
+    return (
+        f"The system resolved the sentiment as **{label_map_local[resolved_label]}** "
+        f"with {confidence_level} confidence ({confidence:.2f}). "
+        f"Base models: BERT={label_map_local[base_preds['bert']['label']]}, "
+        f"RoBERTa={label_map_local[base_preds['roberta']['label']]}, "
+        f"Senti4SD={label_map_local[base_preds['senti4sd']['label']]}."
+    )
+
+
 def shap_to_text_explanation(shap_rows, predicted_label, pred_probs, top_k=6):
-    """Convert SHAP rows into readable explanation."""
     label_map = {-1: "Negative", 0: "Neutral", 1: "Positive"}
     target_label = label_map[predicted_label]
 
@@ -311,49 +335,29 @@ def shap_to_text_explanation(shap_rows, predicted_label, pred_probs, top_k=6):
     return explanation
 
 
-def _fallback_explanation(resolved_label, prob_dict, base_preds):
-    label_map_local = {-1: "Negative", 0: "Neutral", 1: "Positive"}
-    confidence = float(max(prob_dict.values()))
-    confidence_level = "high" if confidence > 0.7 else "moderate" if confidence > 0.5 else "low"
-    return (
-        f"The system resolved the sentiment as **{label_map_local[resolved_label]}** "
-        f"with {confidence_level} confidence ({confidence:.2f}). "
-        f"Base models: BERT={label_map_local[base_preds['bert']['label']]}, "
-        f"RoBERTa={label_map_local[base_preds['roberta']['label']]}, "
-        f"Senti4SD={label_map_local[base_preds['senti4sd']['label']]}."
-    )
-
-
 def _compute_shap_for_resolver(features_np, resolved_label):
     """
     Compute SHAP values for resolver prediction.
-    Expensive: only call when include_shap=True.
+    IMPORTANT: Expensive. Only call when include_shap=True.
     """
     global shap_explainer
 
-    # Import shap lazily
-    import shap
+    import shap  # lazy import
 
-    # Background: simple baseline (zeros) to keep it cheap.
-    # You can also use features_np itself, but that may be unstable.
+    # Very cheap background to keep memory down
     background = np.zeros_like(features_np, dtype=np.float32)
 
     if shap_explainer is None:
-        # Using predict_proba keeps it consistent with your training
         shap_explainer = shap.Explainer(resolver.predict_proba, background)
 
     shap_values = shap_explainer(features_np)
     vals = shap_values.values
 
-    # Determine class index for resolved_label
     pred_class_idx = list(resolver.classes_).index(resolved_label)
 
-    # Handle possible shapes:
-    # (1, n_features) or (1, n_classes, n_features) depending on explainer
     if len(vals.shape) == 2:
         shap_vals = vals[0]
     elif len(vals.shape) == 3:
-        # (sample, class, feature)
         shap_vals = vals[0][pred_class_idx, :]
     else:
         shap_vals = vals.flatten()[: len(FEATURES)]
@@ -374,7 +378,7 @@ def _analyze_text_to_response(text: str, include_shap: bool = False):
         return None, (validation_msg, 400)
 
     if resolver is None:
-        return None, ("Resolver model not loaded", 500)
+        return None, ("Resolver model not loaded on server", 500)
 
     base_preds = get_base_predictions(text)
     features_np = prepare_features(base_preds)
@@ -382,7 +386,6 @@ def _analyze_text_to_response(text: str, include_shap: bool = False):
     resolved_label = int(resolver.predict(features_np)[0])
     resolved_probs = resolver.predict_proba(features_np)[0]
 
-    # Map probs to dict based on resolver.classes_
     classes = list(resolver.classes_)
     prob_dict = {
         -1: float(resolved_probs[classes.index(-1)]),
@@ -406,11 +409,12 @@ def _analyze_text_to_response(text: str, include_shap: bool = False):
                 {
                     "feature": r["feature"],
                     "shap_value": float(r["shap_value"]),
-                    "meaning": FEATURE_MEANING.get(r["feature"], r["feature"])
+                    "meaning": FEATURE_MEANING.get(r["feature"], r["feature"]),
                 }
                 for r in shap_rows[:10]
             ]
-        except Exception:
+        except Exception as e:
+            print(f"[WARN] SHAP failed: {e}")
             explanation = _fallback_explanation(resolved_label, prob_dict, base_preds)
     else:
         explanation = _fallback_explanation(resolved_label, prob_dict, base_preds)
@@ -464,9 +468,29 @@ def _analyze_text_to_response(text: str, include_shap: bool = False):
 # ----------------------------
 # Routes
 # ----------------------------
+@app.route("/api/health", methods=["GET"])
+def health():
+    return jsonify({"ok": True})
+
+
+@app.route("/api/warmup", methods=["GET"])
+def warmup():
+    """
+    Trigger model downloads and show errors in Render logs.
+    Call this once after deploy: /api/warmup
+    """
+    try:
+        get_bert()
+        get_roberta()
+        return jsonify({"ok": True, "message": "Models loaded/cached"})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/")
 def index():
-    # Serve React build if present
     if os.path.isdir(FRONTEND_DIST_DIR):
         return send_from_directory(FRONTEND_DIST_DIR, "index.html")
     return render_template("index.html")
@@ -474,7 +498,6 @@ def index():
 
 @app.route("/results")
 def results():
-    # SPA handles /results if React build exists
     if os.path.isdir(FRONTEND_DIST_DIR):
         return send_from_directory(FRONTEND_DIST_DIR, "index.html")
 
@@ -495,30 +518,35 @@ def results():
 
 @app.route("/api/analyze", methods=["POST"])
 def api_analyze():
-    """React API: analyze text and return results JSON (no session)."""
+    """
+    React API: analyze text and return results JSON (no session).
+    SHAP is OFF by default; set include_shap=true from frontend if needed.
+    """
     try:
-        data = request.get_json(silent=True) or {}
-        include_shap = bool(data.get("include_shap", False))  # default False for memory safety
+        data = request.get_json(force=True) or {}
+        include_shap = bool(data.get("include_shap", False))
         response, err = _analyze_text_to_response(data.get("text"), include_shap=include_shap)
         if err:
             msg, code = err
             return jsonify({"error": msg}), code
         return jsonify(response)
     except Exception as e:
-        return jsonify({"error": f"Error analyzing text: {str(e)}"}), 500
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
     """
-    Legacy endpoint: store results in session.
+    Legacy endpoint: stores results in session for Jinja /results page.
     IMPORTANT: SHAP disabled by default to avoid OOM on free tier.
     """
     try:
         data = request.get_json(silent=True) or {}
         text = (data.get("text") or "").strip()
 
-        response, err = _analyze_text_to_response(text, include_shap=False)  # ✅ changed
+        response, err = _analyze_text_to_response(text, include_shap=False)
         if err:
             msg, code = err
             return jsonify({"error": msg}), code
@@ -527,7 +555,9 @@ def analyze():
         session["input_text"] = text
         return jsonify(response)
     except Exception as e:
-        return jsonify({"error": f"Error analyzing text: {str(e)}"}), 500
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/feedback", methods=["POST"])
@@ -554,8 +584,10 @@ def api_feedback():
             json_module.dump(feedback_data, f, indent=2)
 
         return jsonify({"success": True})
-    except Exception:
-        return jsonify({"success": False}), 500
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/feedback", methods=["POST"])
@@ -566,7 +598,6 @@ def feedback():
         feedback_label = data.get("feedback_label")
         feedback_text = data.get("feedback_text", "")
 
-        # Pull from session-stored analysis
         analysis = json_module.loads(session.get("analysis_results", "{}"))
         resolved_label = analysis.get("resolved", {}).get("label", "")
         confidence = analysis.get("resolved", {}).get("confidence", "")
@@ -591,8 +622,10 @@ def feedback():
             json_module.dump(feedback_data, f, indent=2)
 
         return jsonify({"success": True})
-    except Exception:
-        return jsonify({"success": False}), 500
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/<path:path>")
@@ -610,4 +643,5 @@ def serve_react_static_or_404(path):
 
 
 if __name__ == "__main__":
+    # Local dev only. On Render, use gunicorn.
     app.run(debug=True, host="0.0.0.0", port=int(os.getenv("PORT", "5000")))

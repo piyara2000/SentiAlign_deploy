@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, redirect, url_for, session, send_from_directory, abort
+from flask import Flask, request, jsonify, redirect, url_for, session, send_from_directory, abort
 import joblib
 import torch
 import numpy as np
@@ -277,34 +277,18 @@ def shap_to_text_explanation(shap_df, predicted_label, pred_probs, top_k=6):
 
 @app.route('/')
 def index():
-    """Render the main page (React build if present, else Jinja template)."""
+    """React entrypoint (Flask always serves the React build)."""
     if os.path.isdir(FRONTEND_DIST_DIR):
         return send_from_directory(FRONTEND_DIST_DIR, "index.html")
-    return render_template('index.html')
+    abort(404)
 
 
 @app.route('/results')
 def results():
-    """Display analysis results on a separate page"""
-    # If React build is present, let the SPA handle /results.
+    """React entrypoint for /results (SPA route)."""
     if os.path.isdir(FRONTEND_DIST_DIR):
         return send_from_directory(FRONTEND_DIST_DIR, "index.html")
-
-    if 'analysis_results' not in session:
-        return redirect(url_for('index'))
-    
-    try:
-        results_data = json_module.loads(session.get('analysis_results'))
-        input_text = session.get('input_text', '')
-        
-        # Clear session after displaying
-        session.pop('analysis_results', None)
-        session.pop('input_text', None)
-        
-        return render_template('results.html', results=results_data, input_text=input_text)
-    except (json_module.JSONDecodeError, KeyError) as e:
-        print(f"Error loading results from session: {e}")
-        return redirect(url_for('index'))
+    abort(404)
 
 
 def _analyze_text_to_response(text: str, include_shap: bool = True):
@@ -579,7 +563,7 @@ def feedback():
 def serve_react_static_or_404(path):
     """
     Serve React build assets + SPA fallback when built.
-    Keeps /static and Jinja templates working when the build does not exist.
+    When the React build is not present, this app returns 404 (React-only frontend).
     """
     if path.startswith("api/"):
         abort(404)

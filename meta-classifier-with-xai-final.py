@@ -9,7 +9,7 @@ from sklearn.metrics import cohen_kappa_score
 from scipy.stats import entropy
 
 # LOAD DATA
-INPUT_CSV = "bug_reports_120k_cleaned.csv"
+INPUT_CSV = "bug_reports_with_all_sentiment_probs_120k.csv"
 MODEL_OUT = "sentiment_conflict_resolver.pkl"
 
 df = pd.read_csv(INPUT_CSV)

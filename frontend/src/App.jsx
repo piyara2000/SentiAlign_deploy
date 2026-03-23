@@ -51,7 +51,7 @@ function AnalyzePage() {
   }
 
   return (
-    <div className="container">
+    <div className="container analyze-container">
       <header>
         <h1 className="title">SentiAlign</h1>
         <p className="subtitle">
@@ -68,7 +68,7 @@ function AnalyzePage() {
             id="text-input"
             className="text-input"
             placeholder="Type or Paste your text here ..."
-            rows={8}
+            rows={4}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
@@ -87,7 +87,11 @@ function AnalyzePage() {
             </span>
           </label>
 
-          <button className="btn-primary" onClick={analyze} disabled={loading}>
+          <button
+            className="btn-primary analyze-btn"
+            onClick={analyze}
+            disabled={loading}
+          >
             <span>{loading ? 'Analyzing…' : 'Analyze'}</span>
             <span className="arrow">→</span>
           </button>

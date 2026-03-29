@@ -274,23 +274,6 @@ def shap_to_text_explanation(shap_df, predicted_label, pred_probs, top_k=6):
     
     return explanation
 
-
-@app.route('/')
-def index():
-    """React entrypoint (Flask always serves the React build)."""
-    if os.path.isdir(FRONTEND_DIST_DIR):
-        return send_from_directory(FRONTEND_DIST_DIR, "index.html")
-    abort(404)
-
-
-@app.route('/results')
-def results():
-    """React entrypoint for /results (SPA route)."""
-    if os.path.isdir(FRONTEND_DIST_DIR):
-        return send_from_directory(FRONTEND_DIST_DIR, "index.html")
-    abort(404)
-
-
 def _analyze_text_to_response(text: str, include_shap: bool = True):
     """Core analyzer logic (shared by /analyze and /api/analyze).
 
@@ -448,6 +431,19 @@ def _analyze_text_to_response(text: str, include_shap: bool = True):
 
     return response, None
 
+@app.route('/')
+def index():
+    """React entrypoint (Flask always serves the React build)."""
+    if os.path.isdir(FRONTEND_DIST_DIR):
+        return send_from_directory(FRONTEND_DIST_DIR, "index.html")
+    abort(404)
+
+@app.route('/results')
+def results():
+    """React entrypoint for /results (SPA route)."""
+    if os.path.isdir(FRONTEND_DIST_DIR):
+        return send_from_directory(FRONTEND_DIST_DIR, "index.html")
+    abort(404)
 
 @app.route('/api/analyze', methods=['POST'])
 def api_analyze():
@@ -460,28 +456,6 @@ def api_analyze():
             msg, code = err
             return jsonify({"error": msg}), code
         return jsonify(response)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': f'Error analyzing text: {str(e)}'}), 500
-
-@app.route('/analyze', methods=['POST'])
-def analyze():
-    """Legacy endpoint: analyze and store results in session for the Jinja /results page."""
-    try:
-        data = request.get_json(silent=True) or {}
-        text = (data.get("text") or "").strip()
-
-        # Legacy endpoint keeps SHAP enabled by default
-        response, err = _analyze_text_to_response(text, include_shap=True)
-        if err:
-            msg, code = err
-            return jsonify({"error": msg}), code
-
-        session['analysis_results'] = json_module.dumps(response)
-        session['input_text'] = text
-        return jsonify(response)
-
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -519,45 +493,6 @@ def api_feedback():
     except Exception as e:
         print(f"Feedback error: {e}")
         return jsonify({"success": False}), 500
-
-
-@app.route('/feedback', methods=['POST'])
-def feedback():
-    """Legacy endpoint for the Jinja results page (session-based)."""
-    try:
-        data = request.get_json(silent=True) or {}
-        feedback_label = data.get('feedback_label')
-        feedback_text = data.get('feedback_text', '')
-
-        feedback_entry = {
-            "input_text": session.get("input_text", ""),
-            "resolved_sentiment": json_module.loads(
-                session.get("analysis_results", "{}")
-            ).get("resolved", {}).get("label", ""),
-            "confidence": json_module.loads(
-                session.get("analysis_results", "{}")
-            ).get("resolved", {}).get("confidence", ""),
-            "feedback_label": feedback_label,
-            "feedback_text": feedback_text
-        }
-
-        try:
-            with open("user_feedback.json", "r") as f:
-                feedback_data = json_module.load(f)
-        except FileNotFoundError:
-            feedback_data = []
-
-        feedback_data.append(feedback_entry)
-
-        with open("user_feedback.json", "w") as f:
-            json_module.dump(feedback_data, f, indent=2)
-
-        return jsonify({"success": True})
-
-    except Exception as e:
-        print(f"Feedback error: {e}")
-        return jsonify({"success": False}), 500
-
 
 @app.route('/<path:path>')
 def serve_react_static_or_404(path):
